@@ -1,0 +1,214 @@
+import zipfile
+import boto3
+from io import BytesIO
+bucket="myprojectdata"  
+zipfile_to_unzip="myautoge-cars-dataset.zip"   
+s3_client = boto3.client('s3', use_ssl=False)
+s3_resource = boto3.resource('s3')
+ 
+zip_obj = s3_resource.Object(bucket_name=bucket, key=zipfile_to_unzip)
+buffer = BytesIO(zip_obj.get()["Body"].read())
+z = zipfile.ZipFile(buffer)
+for filename in z.namelist():
+    print('Working on ' + filename)
+    s3_resource.meta.client.upload_fileobj(z.open(filename),Bucket=bucket,Key=f'{filename}')
+
+import pandas as pd
+df = pd.read.csv("s3://myprojectdata/characteristics.csv")
+df.dtypes
+df.shape
+list(df)
+df.isna().sum()
+df.describe()
+
+# Importing functions that will be used
+from pyspark.ml.feature import StringIndexer
+from pyspark.ml.linalg import Vector
+from pyspark.ml.feature import VectorAssembler
+from pyspark.sql.types import IntegerType
+from pyspark.ml.regression import LinearRegression
+
+# Obtaining data from S3 bucket
+bucket = 'myprojectdata/'
+filename = 'characteristics.csv' 
+file_path = 's3a://' + bucket + filename
+
+# Converting CSV data file into a Spark dataframe
+sdf = spark.read.csv(file_path, header=True, inferSchema=True)
+
+# Checking data schema
+sdf.printSchema()
+
+
+# Dropping all null rows
+sdf = sdf.na.drop()
+
+
+# Filtering dataframe to remove variables where price is a string
+sdf = sdf.filter(sdf.price != 'Price negotiable')
+
+# Indexing all string columns to numerical values and storing in new dataframe “indexed”
+indexer =  StringIndexer(inputCol = "manufacturer", outputCol = "manufacturer_cat")
+indexed = indexer.fit(sdf).transform(sdf)
+indexed = indexed.drop("manufacturer")
+
+indexer =  StringIndexer(inputCol = "model", outputCol = "model_cat")
+indexed = indexer.fit(indexed).transform(indexed)
+indexed = indexed.drop("model")
+
+indexer =  StringIndexer(inputCol = "category", outputCol = "category_cat")
+indexed = indexer.fit(indexed).transform(indexed)
+indexed = indexed.drop("category")
+
+indexer =  StringIndexer(inputCol = "gear_box_type", outputCol = "gear_box_type_cat")
+indexed = indexer.fit(indexed).transform(indexed)
+indexed = indexed.drop("gear_box_type")
+
+indexer =  StringIndexer(inputCol = "doors", outputCol = "doors_cat")
+indexed = indexer.fit(indexed).transform(indexed)
+indexed = indexed.drop("doors")
+
+
+
+indexer =  StringIndexer(inputCol = "wheel", outputCol = "wheel_cat")
+indexed = indexer.fit(indexed).transform(indexed)
+indexed = indexed.drop("wheel")
+
+indexer =  StringIndexer(inputCol = "color", outputCol = "color_cat")
+indexed = indexer.fit(indexed).transform(indexed)
+indexed = indexed.drop("color")
+
+
+indexer =  StringIndexer(inputCol = "interior_color", outputCol = "interior_color_cat")
+indexed = indexer.fit(indexed).transform(indexed)
+indexed = indexed.drop("interior_color")
+
+
+indexer =  StringIndexer(inputCol = "vin", outputCol = "vin_cat")
+indexed = indexer.fit(indexed).transform(indexed)
+indexed = indexed.drop("vin")
+
+indexer =  StringIndexer(inputCol = "deal_type", outputCol = "deal_type_cat")
+indexed = indexer.fit(indexed).transform(indexed)
+indexed = indexed.drop("deal_type")
+
+
+# Creating a vector column with independent variables
+
+assembler = VectorAssembler(inputCols = ['mileage', 'year', 'leather_interior', 'customs', 'manufacturer_cat', 'model_cat', 'category_cat', 'gear_box_type_cat', 'doors_cat', 'wheel_cat', 'color_cat', 'interior_color_cat', 'vin_cat', 'deal_type_cat'], outputCol = 'features')
+
+
+# Casting “price” variable to an integer in indexed dataframe
+indexed = indexed.withColumn("price", indexed["price"].cast(IntegerType()))
+
+# Creating new output dataframe from transforming indexed dataframe using assembler
+output = assembler.transform(indexed)
+output.show()
+
+# Creating final_data dataframe with only “features” and “price” column
+final_data = output.select("features", "price")
+final_data.show()
+
+# Splitting data into training and testing sets
+train_data, test_data = final_data.randomSplit([0.7,0.3])
+
+# Running LinearRegression function with “features” against “price”
+lr = LinearRegression(featuresCol = 'features', labelCol = 'price')
+
+# Training model using lr.fit on test data
+trained_model = lr.fit(train_data)
+
+# Finding R-squared
+results = trained_model.evaluate(train_data) 
+print(results.r2)
+
+# Creating dataframe with only feature data in vector column
+feature_data = test_data.select("features")
+feature_data.show()
+
+# Passing feature data to trained_model to create dataframe showing features and price predictions
+predictions = trained_model.transform(feature_data)
+predictions.show()
+
+# Creating output_df dataframe containing only price predictions
+output_df = predictions.select("prediction")
+output_df.show()
+
+# Writing output_df back to S3 as a CSV file
+output_file_path="s3://myprojectdata/predicted_price_data.csv"
+output_df.write.options(header='True').csv(output_file_path)
+
+
+import io 
+import matplotlib.pyplot as plt 
+import s3fs 
+
+#Plot 1
+manufacturer_count_df = sdf.groupby("manufacturer").count().sort("manufacturer").toPandas()
+
+plt.bar(manufacturer_count_df["manufacturer"],manufacturer_count_df["count"])
+plt.title("Number of Cars per Manufacturer")
+plt.xticks(rotation=90)
+
+
+img_data = io.BytesIO() 
+plt.savefig(img_data, format='png', bbox_inches='tight') 
+img_data.seek(0) 
+s3 = s3fs.S3FileSystem(anon=False) 
+with s3.open('s3://myprojectdata/plot1.png', 'wb') as f: f.write(img_data.getbuffer())
+
+#Plot 2
+category_count_df = sdf.groupby("category").count().sort("category").toPandas()
+
+plt.bar(category_count_df["category"],category_count_df["count"])
+plt.title("Number of Cars per Category")
+plt.xticks(rotation=90)
+
+img_data = io.BytesIO() 
+plt.savefig(img_data, format='png', bbox_inches='tight') 
+img_data.seek(0) 
+s3 = s3fs.S3FileSystem(anon=False) 
+with s3.open('s3://myprojectdata/plot2.png', 'wb') as f: f.write(img_data.getbuffer())
+
+
+#Plot 3
+gear_box_df = sdf.groupby("gear_box_type").count().sort("gear_box_type").toPandas()
+
+plt.bar(gear_box_df["gear_box_type"],gear_box_df["count"])
+plt.title("Frequency of Transmission Types")
+plt.xticks(rotation=90)
+
+img_data = io.BytesIO() 
+plt.savefig(img_data, format='png', bbox_inches='tight') 
+img_data.seek(0) 
+s3 = s3fs.S3FileSystem(anon=False) 
+with s3.open('s3://myprojectdata/plot3.png', 'wb') as f: f.write(img_data.getbuffer())
+
+
+#Plot 4
+prediction_df_pandas = output_df.select("prediction").toPandas()
+
+plt.plot(prediction_df_pandas[“prediction”])
+plt.title("Predictions for Car Price")
+
+img_data = io.BytesIO() 
+plt.savefig(img_data, format='png', bbox_inches='tight') 
+img_data.seek(0) 
+s3 = s3fs.S3FileSystem(anon=False) 
+with s3.open('s3://myprojectdata/plot4.png', 'wb') as f: f.write(img_data.getbuffer())
+
+
+#Plot 5
+mileage_price_df = sdf.select("mileage”, “price”).toPandas()
+plt.scatter(mileage_price_df[“mileage”],mileage_price_df[“price”])
+#in the above image I used plt.plot(), although the goal is to visualize this data using plt.scatter()
+plt.title("Car Mileage vs Price Scatter Plot")
+
+img_data = io.BytesIO() 
+plt.savefig(img_data, format='png', bbox_inches='tight') 
+img_data.seek(0) 
+s3 = s3fs.S3FileSystem(anon=False) 
+with s3.open('s3://myprojectdata/plot5.png', 'wb') as f: f.write(img_data.getbuffer())
+
+
+
